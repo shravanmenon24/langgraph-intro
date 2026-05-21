@@ -1,21 +1,22 @@
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
-load_dotenv()  # take environment variables from .env.
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
+REDIS_URI = os.getenv("REDIS_URI")
+DATABASE_URI = os.getenv("DATABASE_URI")
 
-SUPABASE_URL=os.getenv("SUPABASE_URL", None)
-OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", None)
-LANGSMITH_API_KEY=os.getenv("LANGSMITH_API_KEY", None)
-REDIS_URI=os.getenv("REDIS_URI", None)
-DATABASE_URI=os.getenv("DATABASE_URI", None)
+required_env_vars = {
+    "SUPABASE_URL": SUPABASE_URL,
+    "GOOGLE_API_KEY": GOOGLE_API_KEY,
+}
 
+missing = [k for k, v in required_env_vars.items() if not v]
 
-required_env_vars = [
-    "SUPABASE_URL",
-    "OPENAI_API_KEY",
-]
-
-for var in required_env_vars:
-    if not var:
-        raise ValueError(f"Missing required environment variable: {var}")
+if missing:
+    raise ValueError(f"Missing required environment variables: {missing}")
