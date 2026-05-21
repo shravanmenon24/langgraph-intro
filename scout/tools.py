@@ -9,6 +9,13 @@ from langgraph.types import Command
 from langchain_core.tools.base import InjectedToolCallId
 from typing import Annotated
 from langchain_core.messages import ToolMessage
+import subprocess
+import sys
+import os
+from astroquery.heasarc import Heasarc
+from astropy.io import fits
+import pandas as pd
+import json
 
 
 class ServerSession:
@@ -154,17 +161,29 @@ if 'fig' in locals() or 'fig' in globals():
     code = pre_code + plotly_code + post_code
 
     # Prepare execution environment with database connection
-    exec_globals = {}
+    # exec_globals = {}
 
-    # Pass the server session engine to the code
-    if "engine" in code:
-        exec_globals['engine'] = session.engine
+    # # Pass the server session engine to the code
+    # if "engine" in code:
+    #     exec_globals['engine'] = session.engine
+
+    # try:
+    #     # Execute the code with captured output
+    #     print(f"Executing code: \n\n{code}\n\n")
+    #     with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+    #         exec(code, exec_globals, {})
+
+    # Prepare execution environment with a unified context dictionary
+    exec_context = {
+        "engine": session.engine
+    }
 
     try:
         # Execute the code with captured output
         print(f"Executing code: \n\n{code}\n\n")
         with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-            exec(code, exec_globals, {})
+            # CRITICAL FIX: Pass exec_context as BOTH globals and locals
+            exec(code, exec_context, exec_context)
 
         # Get the output and error messages
         print(f"STDOUT: \n\n{stdout_capture.getvalue()}\n")
@@ -194,3 +213,91 @@ if 'fig' in locals() or 'fig' in globals():
         # Get the error message
         error_message = str(e)
         return f"Error executing visualization code: {error_message}"
+
+@tool
+def fetch_nasa_nicer_products(target_name: str, obs_id: str = None, max_records: int = 3) -> str:
+    """
+    Queries NASA's live HEASARC archive for NICER observations.
+    
+    Args:
+        target_name: The name of the celestial target (e.g., 'Cyg X-1'). REQUIRED.
+        obs_id: A specific 10-digit ObsID string (e.g., '8656010601') to isolate one observation. Optional.
+        max_records: Maximum records to download if no specific obs_id is provided.
+    """
+    try:
+        heasarc = Heasarc()
+        os.makedirs("nicer_data", exist_ok=True)
+        
+        print(f"Searching NASA HEASARC for target: {target_name}...")
+        # A standard region query using the target name avoids the API crash
+        table = heasarc.query_region(target_name, catalog="nicermastr")
+        
+        if table is None or len(table) == 0:
+            return f"No observations found for target: {target_name}"
+        
+        # If an exact ObsID is requested, filter the table safely
+        if obs_id:
+            print(f"Filtering results for exact ObsID: {obs_id}...")
+            
+            # Extract OBSID column and strip out Astropy's byte-string formatting (b'...')
+            table_obsids = [str(val).replace("b'", "").replace("'", "").strip() for val in table['OBSID']]
+            
+            if obs_id not in table_obsids:
+                return f"ObsID {obs_id} not found in the recent data for {target_name}."
+            
+            # Slice the table to keep ONLY the matched row
+            match_index = table_obsids.index(obs_id)
+            table = table[match_index : match_index + 1]
+            
+        else:
+            table = table[:max_records]
+            
+        print(f"Locating downloadable files for {len(table)} matching observation row(s)...")
+        links = heasarc.locate_data(table)
+        
+        if links is None or len(links) == 0:
+            return "No public high-level data products are available for this specific query."
+
+        print("Downloading science products from HEASARC...")
+        local_files = heasarc.download_data(links, location="nicer_data")
+        
+        return json.dumps({
+            "status": "Success",
+            "message": f"Successfully pulled data products.",
+            "downloaded_files_count": len(local_files) if local_files else 0,
+            "saved_location": "nicer_data/"
+        }, indent=2)
+        
+    except Exception as e:
+        return f"Failed to retrieve data from NASA web server: {str(e)}"
+
+@tool
+def execute_nicer_analysis(script_name: str, python_code: str) -> str:
+    """
+    Executes an advanced Python script for pulling, reprocessing, or analyzing 
+    NICER data using libraries like heasoftpy, astroquery, and astropy.
+    The code runs inside a local shell environment where HEASoft is initialized.
+    """
+    os.makedirs("nicer_workspace", exist_ok=True)
+    file_path = f"nicer_workspace/{script_name}.py"
+    
+    # Write the AI-generated code string to a physical file
+    with open(file_path, "w") as f:
+        f.write(python_code)
+        
+    try:
+        # Run it via a subprocess shell so it has access to heasoftpy / HEADAS
+        result = subprocess.run(
+            [sys.executable, file_path],
+            capture_output=True,
+            text=True,
+            timeout=300 # Give it 5 minutes for heavy processing
+        )
+        
+        output = result.stdout
+        if result.stderr:
+            output += f"\n--- RUNTIME ERRORS/WARNINGS ---\n{result.stderr}"
+        return output if output else "Script executed successfully with no terminal output."
+        
+    except subprocess.TimeoutExpired:
+        return "Error: Execution timed out. The data reduction took longer than 5 minutes."
